@@ -1,0 +1,229 @@
+/************************************************************
+-- Project: TheLook E-Commerce Analytics
+-- Author: Martin Mulei
+-- Date: 2026-02-27
+-- Purpose: Unified SQL script for fact and dimension tables,
+--          customer analytics (RFM, churn, segments), monthly churn
+-- Dataset: bigquery-public-data.thelook_ecommerce
+-- Notes: All views created in analytics dataset
+************************************************************/
+
+/************************************************************
+-- TABLE OF CONTENTS
+-- 1. Fact Table: fact_sales
+-- 2. Dimension Tables: dim_date, dim_product, dim_customer
+-- 3. Customer Base: customer_base
+-- 4. Purchase Cycle: customer_purchase_cycle
+-- 5. Customer Churn: customer_churn
+-- 6. RFM Scoring: customer_rfm
+-- 7. Customer Segments: customer_segments
+-- 8. Monthly Churn: monthly_churn
+-- 9. Churn Revenue Loss: churn_revenue_loss
+************************************************************/
+
+/************************************************************
+-- SECTION 1: FACT TABLE
+-- Table: fact_sales
+-- Purpose: Transaction-level data including product, customer, and status
+************************************************************/
+CREATE OR REPLACE VIEW analytics.fact_sales AS
+SELECT
+    oi.id AS order_item_id,
+    oi.order_id,
+    oi.user_id,
+    oi.product_id,
+    oi.sale_price,
+    oi.created_at,
+    oi.status,
+    p.category,
+    p.department,
+    u.country,
+    u.gender
+FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+LEFT JOIN `bigquery-public-data.thelook_ecommerce.products` AS p
+    ON oi.product_id = p.id
+LEFT JOIN `bigquery-public-data.thelook_ecommerce.users` AS u
+    ON oi.user_id = u.id
+WHERE oi.status = "Complete";
+
+/************************************************************
+-- SECTION 2: DIMENSION TABLES
+-- 2a. dim_date
+-- Purpose: Calendar table for time intelligence
+************************************************************/
+CREATE OR REPLACE VIEW analytics.dim_date AS
+WITH calendar AS (
+    SELECT DATE('2022-01-01') + INTERVAL n DAY AS order_date
+    FROM UNNEST(GENERATE_ARRAY(0, 2000)) AS n  -- adjust to cover your date range
+)
+SELECT
+    order_date,
+    EXTRACT(YEAR FROM order_date) AS year,
+    EXTRACT(MONTH FROM order_date) AS month,
+    EXTRACT(DAY FROM order_date) AS day,
+    EXTRACT(QUARTER FROM order_date) AS quarter,
+    FORMAT_DATE('%Y-%m', order_date) AS year_month,
+    FORMAT_DATE('%b-%Y', order_date) AS month_name_year,
+    FORMAT_DATE('%A', order_date) AS day_name,
+    EXTRACT(DAYOFWEEK FROM order_date) AS day_of_week,
+    CASE
+        WHEN EXTRACT(MONTH FROM order_date) BETWEEN 1 AND 3 THEN 'Q1'
+        WHEN EXTRACT(MONTH FROM order_date) BETWEEN 4 AND 6 THEN 'Q2'
+        WHEN EXTRACT(MONTH FROM order_date) BETWEEN 7 AND 9 THEN 'Q3'
+        ELSE 'Q4'
+    END AS quarter_name
+FROM calendar;
+
+/************************************************************
+-- 2b. dim_product
+-- Purpose: Product master table for reporting
+************************************************************/
+CREATE OR REPLACE VIEW analytics.dim_product AS
+SELECT DISTINCT
+    id AS product_id,
+    category,
+    department,
+    brand,
+    retail_price
+FROM `bigquery-public-data.thelook_ecommerce.products`;
+
+/************************************************************
+-- 2c. dim_customer
+-- Purpose: Customer master table
+************************************************************/
+CREATE OR REPLACE VIEW analytics.dim_customer AS
+SELECT DISTINCT
+    id AS user_id,
+    gender,
+    age,
+    country,
+    traffic_source
+FROM `bigquery-public-data.thelook_ecommerce.users`;
+
+/************************************************************
+-- SECTION 3: CUSTOMER BASE
+-- Purpose: Aggregate metrics at user level for analytics
+-- Note: Create this before churn and RFM calculations
+************************************************************/
+CREATE OR REPLACE VIEW analytics.customer_base AS
+SELECT
+    user_id,
+    MAX(created_at) AS last_purchase_date,
+    COUNT(order_id) AS total_orders,
+    SUM(sale_price) AS total_revenue,
+    DATE_DIFF(CURRENT_DATE(), MAX(created_at), DAY) AS recency_days
+FROM analytics.fact_sales
+GROUP BY user_id;
+
+/************************************************************
+-- SECTION 4: CUSTOMER PURCHASE CYCLE
+-- Purpose: Average days between purchases for each customer
+************************************************************/
+CREATE OR REPLACE VIEW analytics.customer_purchase_cycle AS
+WITH ordered AS (
+    SELECT
+        user_id,
+        DATE(created_at) AS purchase_date,
+        LAG(DATE(created_at)) OVER (PARTITION BY user_id ORDER BY DATE(created_at)) AS prev_purchase
+    FROM analytics.fact_sales
+)
+SELECT
+    user_id,
+    AVG(DATE_DIFF(purchase_date, prev_purchase, DAY)) AS avg_purchase_cycle_days
+FROM ordered
+WHERE prev_purchase IS NOT NULL
+GROUP BY user_id;
+
+/************************************************************
+-- SECTION 5: CUSTOMER CHURN
+-- Purpose: Identify churned customers
+-- Logic: Recency > avg_purchase_cycle_days (or default 90)
+************************************************************/
+CREATE OR REPLACE VIEW analytics.customer_churn AS
+SELECT
+    base.*,
+    purchase_cycle.avg_purchase_cycle_days,
+    CASE
+        WHEN base.recency_days > IFNULL(purchase_cycle.avg_purchase_cycle_days, 90)
+        THEN 1
+        ELSE 0
+    END AS is_churned
+FROM analytics.customer_base AS base
+LEFT JOIN analytics.customer_purchase_cycle AS purchase_cycle
+    ON base.user_id = purchase_cycle.user_id;
+
+/************************************************************
+-- SECTION 6: CUSTOMER RFM SCORING
+-- Purpose: Assign Recency, Frequency, Monetary scores
+************************************************************/
+CREATE OR REPLACE VIEW analytics.customer_rfm AS
+WITH scored AS (
+    SELECT
+        *,
+        NTILE(5) OVER (ORDER BY recency_days ASC) AS r_score,
+        NTILE(5) OVER (ORDER BY total_orders DESC) AS f_score,
+        NTILE(5) OVER (ORDER BY total_revenue DESC) AS m_score
+    FROM analytics.customer_churn
+)
+SELECT
+    *,
+    CONCAT(CAST(r_score AS STRING),
+           CAST(f_score AS STRING),
+           CAST(m_score AS STRING)) AS rfm_score
+FROM scored;
+
+/************************************************************
+-- SECTION 7: CUSTOMER SEGMENTS
+-- Purpose: Assign segment based on RFM scores
+************************************************************/
+CREATE OR REPLACE VIEW analytics.customer_segments AS
+SELECT *,
+    CASE
+        WHEN r_score >=4 AND f_score >=4 AND m_score >=4 THEN 'Champions'
+        WHEN r_score >=3 AND f_score >=3 THEN 'Loyal Customers'
+        WHEN r_score >=4 AND f_score <=2 THEN 'New Customers'
+        WHEN r_score <=2 AND f_score >=3 THEN 'At Risk'
+        WHEN r_score <=2 AND f_score <=2 THEN 'Lost'
+        ELSE 'Others'
+    END AS segment
+FROM analytics.customer_rfm;
+
+/************************************************************
+-- SECTION 8: MONTHLY CHURN
+-- Purpose: Calculate monthly active customers and churn rate
+************************************************************/
+CREATE OR REPLACE VIEW analytics.monthly_churn AS
+WITH monthly_activity AS (
+    SELECT
+        DATE_TRUNC(DATE(created_at), MONTH) AS month_date,
+        user_id
+    FROM analytics.fact_sales
+    GROUP BY 1,2
+),
+monthly_customers AS (
+    SELECT
+        month_date,
+        COUNT(DISTINCT user_id) AS active_customers
+    FROM monthly_activity
+    GROUP BY month_date
+)
+SELECT
+    month_date,
+    active_customers,
+    LAG(active_customers) OVER (ORDER BY month_date) AS previous_month_customers,
+    SAFE_DIVIDE(
+        LAG(active_customers) OVER (ORDER BY month_date) - active_customers,
+        LAG(active_customers) OVER (ORDER BY month_date)
+    ) AS churn_rate
+FROM monthly_customers
+ORDER BY month_date;
+
+/************************************************************
+-- SECTION 9: CHURN REVENUE LOSS
+-- Purpose: Sum revenue lost due to churn
+************************************************************/
+CREATE OR REPLACE VIEW analytics.churn_revenue_loss AS
+SELECT
+    SUM(total_revenue) AS revenue_lost
+FROM analytics.customer_segments
+WHERE segment IN ('At Risk', 'Lost');

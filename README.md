@@ -5,6 +5,7 @@ End-to-end Business Intelligence solution integrating financial performance anal
 ---
 
 ## Overview
+ ![Dashboard Overview](Snapshots/Financial_Health_Dashboard.png)
 
 Designed and implemented a scalable BI framework that transforms raw transactional e-commerce data into an executive-ready decision support system.
 

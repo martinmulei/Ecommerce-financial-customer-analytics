@@ -66,7 +66,7 @@ BigQuery (SQL Transformation Layer) → Star Schema Model → DAX Measures → P
 - Revenue by Segment
 - Revenue by Channel
 - Revenue Lost to Churn
-![KPIs](Snapshots/Customer_insights.png)
+![KPIs](Snapshots/Customer_KPIs.png)
 
 ---
 

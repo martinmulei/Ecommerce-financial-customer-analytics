@@ -1,0 +1,115 @@
+/************************************************************
+-- Project: TheLook E-Commerce Analytics
+-- Author: Martin Mulei
+-- Date: 2026-02-27
+-- Purpose: Single DAX script containing all calculated columns,
+--          financial KPIs, customer KPIs, and time intelligence
+-- Notes: Organized for Power BI model
+************************************************************/
+
+/************************************************************
+-- SECTION 1: CALCULATED COLUMNS
+************************************************************/
+
+-- Revenue per order
+Revenue = fact_sales[Quantity] * fact_sales[Unit Price]
+
+-- Net Revenue adjusted for refunds
+Net Revenue = [Revenue] - fact_sales[Refund Amount]
+
+-- Profit per order
+Profit = [Net Revenue] - fact_sales[Cost]
+
+-- Extract year for time analysis
+Year = YEAR(fact_sales[Order Date])
+
+-- Extract month for time analysis
+Month = MONTH(fact_sales[Order Date])
+
+-- Month-Year for time hierarchy
+Month-Year = FORMAT(fact_sales[Order Date], "MMM-YYYY")
+
+-- Flag active customers for churn analysis (active in last 30 days)
+Customer Active Flag = IF(dim_customer[Last Purchase Date] >= TODAY()-30, 1, 0)
+
+
+/************************************************************
+-- SECTION 2: FINANCIAL KPI MEASURES
+************************************************************/
+
+-- Total Revenue
+Total Revenue = SUM(fact_sales[Revenue])
+
+-- Net Revenue
+Net Revenue KPI = SUM(fact_sales[Net Revenue])
+
+-- Total Cost
+Total Cost = SUM(fact_sales[Cost])
+
+-- Gross Profit
+Gross Profit = SUMX(fact_sales, fact_sales[Revenue] - fact_sales[Cost])
+
+-- Contribution Margin %
+Contribution Margin % = DIVIDE([Gross Profit], [Total Revenue])
+
+-- Average Order Value
+Average Order Value = DIVIDE([Total Revenue], [Total Orders])
+
+-- Total Orders
+Total Orders = COUNT(fact_sales[Order_Item_ID])
+
+-- Year-over-Year Revenue Growth %
+YoY Revenue Growth % =
+DIVIDE(
+    [Total Revenue] - CALCULATE([Total Revenue], SAMEPERIODLASTYEAR(dim_date[Order_Date])),
+    CALCULATE([Total Revenue], SAMEPERIODLASTYEAR(dim_date[Order_Date]))
+)
+
+-- Refund Revenue
+Refund Revenue = CALCULATE([Total Revenue], fact_sales[Status] = "Returned")
+
+-- Net Revenue after Refunds
+Net Revenue (after Refunds) = [Total Revenue] - [Refund Revenue]
+
+
+/************************************************************
+-- SECTION 3: CUSTOMER KPI MEASURES
+************************************************************/
+
+-- Total Customers
+Total Customers = DISTINCTCOUNT(dim_customer[User_ID])
+
+-- Active Customers
+Active Customers = CALCULATE([Total Customers], dim_customer[Customer Active Flag] = 1)
+
+-- Churned Customers
+Churned Customers = CALCULATE([Total Customers], dim_customer[Customer Active Flag] = 0)
+
+-- Churn Rate %
+Churn Rate % = DIVIDE([Churned Customers], CALCULATE([Total Customers], DATEADD(dim_date[Order_Date], -1, MONTH)))
+
+-- Revenue Lost to Churn
+Revenue Lost to Churn = CALCULATE([Revenue], dim_customer[Customer Active Flag] = 0)
+
+-- Revenue by Segment (Champions example)
+Revenue by Segment (Champions) = CALCULATE([Total Revenue], customer_segments[Segment] = "Champions")
+
+-- Revenue by Acquisition Channel (Search example)
+Revenue by Acquisition Channel (Search) = CALCULATE([Total Revenue], dim_customer[Acquisition Channel] = "Search")
+
+-- Revenue by Gender (Female example)
+Revenue by Gender (Female) = CALCULATE([Total Revenue], dim_customer[Gender] = "Female")
+
+
+/************************************************************
+-- SECTION 4: TIME INTELLIGENCE FUNCTIONS
+************************************************************/
+
+-- Compare revenue YoY
+Revenue YoY = CALCULATE([Total Revenue], SAMEPERIODLASTYEAR(dim_date[Order_Date]))
+
+-- Compare revenue MoM
+Revenue MoM = CALCULATE([Total Revenue], DATEADD(dim_date[Order_Date], -1, MONTH))
+
+-- Year-to-Date calculation
+Revenue YTD = TOTALYTD([Total Revenue], dim_date[Order_Date])
